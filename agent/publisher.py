@@ -1,0 +1,685 @@
+"""Publisher – generates static HTML dashboard from daily research JSON."""
+
+import json
+import re
+import shutil
+from datetime import date
+from pathlib import Path
+
+from jinja2 import Template
+
+from agent.config import DATA_DIR, SITE_DIR
+
+DASHBOARD_TEMPLATE = Template("""\
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Research Brief – {{ data.date }}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --bg: #faf9f6;
+            --card-bg: #ffffff;
+            --text: #1a1a1a;
+            --text-secondary: #5a5a5a;
+            --accent: #0d9373;
+            --accent-hover: #0b7d63;
+            --border: #e5e2dc;
+            --tag-bg: #f0efec;
+            --high: #0d9373;
+            --medium: #d4a843;
+            --low: #8b8b8b;
+            --serif: 'Instrument Serif', Georgia, serif;
+            --mono: 'JetBrains Mono', 'Courier New', monospace;
+            --sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
+        }
+
+        body {
+            font-family: var(--sans);
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .container {
+            max-width: 920px;
+            margin: 0 auto;
+            padding: 2rem 1.5rem;
+        }
+
+        /* === HEADER === */
+        header {
+            border-bottom: 2px solid var(--text);
+            padding-bottom: 1.5rem;
+            margin-bottom: 2rem;
+        }
+        header h1 {
+            font-family: var(--serif);
+            font-size: 2.5rem;
+            font-weight: 400;
+            letter-spacing: -0.02em;
+            line-height: 1.1;
+        }
+        .header-meta {
+            display: flex;
+            gap: 1.5rem;
+            margin-top: 0.75rem;
+            font-family: var(--mono);
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+
+        /* === CONTROLS === */
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+            align-items: center;
+            margin-bottom: 2rem;
+            padding-bottom: 1.5rem;
+            border-bottom: 1px solid var(--border);
+        }
+        .search-box {
+            flex: 1;
+            min-width: 200px;
+            padding: 0.5rem 0.75rem;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font-family: var(--mono);
+            font-size: 0.8rem;
+            background: var(--card-bg);
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .search-box:focus { border-color: var(--accent); }
+        .search-box::placeholder { color: #b0ada6; }
+
+        .filter-group {
+            display: flex;
+            gap: 0.4rem;
+            flex-wrap: wrap;
+        }
+        .filter-btn {
+            padding: 0.3rem 0.7rem;
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            background: var(--card-bg);
+            font-family: var(--mono);
+            font-size: 0.7rem;
+            cursor: pointer;
+            transition: all 0.15s;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .filter-btn:hover { border-color: var(--accent); color: var(--accent); }
+        .filter-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+        .toggle-btn {
+            padding: 0.3rem 0.7rem;
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            background: var(--card-bg);
+            font-family: var(--mono);
+            font-size: 0.7rem;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .toggle-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+        /* === TOPIC SECTIONS === */
+        .topic-section {
+            margin-bottom: 2.5rem;
+        }
+        .topic-header {
+            cursor: pointer;
+            padding: 1.25rem 1.5rem;
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px 6px 0 0;
+            transition: background 0.15s;
+            position: relative;
+        }
+        .topic-section.collapsed .topic-header {
+            border-radius: 6px;
+        }
+        .topic-header:hover { background: #f7f6f3; }
+        .topic-headline {
+            font-family: var(--serif);
+            font-size: 1.6rem;
+            font-weight: 400;
+            line-height: 1.25;
+            margin-bottom: 0.5rem;
+        }
+        .topic-name {
+            font-family: var(--mono);
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--accent);
+            margin-bottom: 0.4rem;
+        }
+        .topic-summary {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            line-height: 1.65;
+        }
+        .expand-icon {
+            position: absolute;
+            top: 1.25rem;
+            right: 1.5rem;
+            font-size: 1.2rem;
+            color: var(--text-secondary);
+            transition: transform 0.25s;
+        }
+        .topic-section.collapsed .expand-icon { transform: rotate(-90deg); }
+
+        .topic-body {
+            border: 1px solid var(--border);
+            border-top: none;
+            border-radius: 0 0 6px 6px;
+            overflow: hidden;
+            transition: max-height 0.35s ease;
+        }
+        .topic-section.collapsed .topic-body {
+            max-height: 0;
+            border: none;
+        }
+
+        .share-btn {
+            position: absolute;
+            top: 1.25rem;
+            right: 3.5rem;
+            background: none;
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            padding: 0.2rem 0.5rem;
+            font-family: var(--mono);
+            font-size: 0.65rem;
+            cursor: pointer;
+            color: var(--text-secondary);
+            transition: all 0.15s;
+        }
+        .share-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+        /* === DEVELOPMENTS === */
+        .developments { padding: 0.5rem 1.5rem 1rem; }
+        .developments h3 {
+            font-family: var(--mono);
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--text-secondary);
+            margin: 1rem 0 0.75rem;
+        }
+        .dev-card {
+            display: grid;
+            grid-template-columns: 4px 1fr;
+            gap: 1rem;
+            padding: 1rem 0;
+            border-bottom: 1px solid var(--border);
+        }
+        .dev-card:last-child { border-bottom: none; }
+        .relevance-bar {
+            width: 4px;
+            border-radius: 2px;
+            min-height: 100%;
+        }
+        .relevance-bar.high { background: var(--high); }
+        .relevance-bar.medium { background: var(--medium); }
+        .relevance-bar.low { background: var(--low); }
+        .dev-content h4 {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 0.3rem;
+        }
+        .dev-content p {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            margin-bottom: 0.5rem;
+        }
+        .dev-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            align-items: center;
+        }
+        .dev-source {
+            font-family: var(--mono);
+            font-size: 0.7rem;
+            color: var(--accent);
+            text-decoration: none;
+        }
+        .dev-source:hover { text-decoration: underline; }
+        .tag {
+            font-family: var(--mono);
+            font-size: 0.65rem;
+            padding: 0.15rem 0.45rem;
+            background: var(--tag-bg);
+            border-radius: 3px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .tag:hover { background: var(--accent); color: #fff; }
+
+        /* === MARKET SIGNALS === */
+        .market-signals {
+            padding: 1rem 1.5rem;
+            border-top: 1px solid var(--border);
+            background: #fdfcfa;
+        }
+        .market-signals h3 {
+            font-family: var(--mono);
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--text-secondary);
+            margin-bottom: 0.6rem;
+        }
+        .signal-pills {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.4rem;
+        }
+        .signal-pill {
+            font-family: var(--mono);
+            font-size: 0.75rem;
+            padding: 0.3rem 0.7rem;
+            background: var(--tag-bg);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            color: var(--text);
+        }
+
+        /* === OUTLOOK === */
+        .outlook {
+            padding: 1rem 1.5rem;
+            border-top: 1px solid var(--border);
+            background: #f8f7f4;
+        }
+        .outlook h3 {
+            font-family: var(--mono);
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--text-secondary);
+            margin-bottom: 0.4rem;
+        }
+        .outlook p {
+            font-size: 0.9rem;
+            font-style: italic;
+            color: var(--text-secondary);
+        }
+
+        /* === FOOTER === */
+        footer {
+            margin-top: 3rem;
+            padding-top: 1.5rem;
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+        .archive-links {
+            font-family: var(--mono);
+            font-size: 0.75rem;
+        }
+        .archive-links a {
+            color: var(--accent);
+            text-decoration: none;
+            margin-right: 0.75rem;
+        }
+        .archive-links a:hover { text-decoration: underline; }
+        .footer-note {
+            font-family: var(--mono);
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+        }
+
+        /* === NO RESULTS === */
+        .no-results {
+            text-align: center;
+            padding: 3rem 1rem;
+            color: var(--text-secondary);
+            font-family: var(--mono);
+            font-size: 0.85rem;
+        }
+
+        /* === TOAST === */
+        .toast {
+            position: fixed;
+            bottom: 2rem;
+            left: 50%;
+            transform: translateX(-50%) translateY(100px);
+            background: var(--text);
+            color: var(--bg);
+            font-family: var(--mono);
+            font-size: 0.8rem;
+            padding: 0.6rem 1.2rem;
+            border-radius: 4px;
+            opacity: 0;
+            transition: all 0.3s;
+            z-index: 100;
+        }
+        .toast.show {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+        }
+
+        /* === RESPONSIVE === */
+        @media (max-width: 768px) {
+            .container { padding: 1.25rem 1rem; }
+            header h1 { font-size: 1.8rem; }
+            .topic-headline { font-size: 1.3rem; }
+            .header-meta { flex-direction: column; gap: 0.3rem; }
+            .controls { flex-direction: column; }
+            .search-box { min-width: 100%; }
+        }
+        @media (max-width: 480px) {
+            header h1 { font-size: 1.5rem; }
+            .topic-header { padding: 1rem; }
+            .developments, .market-signals, .outlook { padding: 0.75rem 1rem; }
+            .share-btn { display: none; }
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <header>
+        <h1>Daily Research Brief</h1>
+        <div class="header-meta">
+            <time>{{ data.date }}</time>
+            <span>{{ data.topics | length }} Themen</span>
+            <span>Aktualisiert {{ data.generated_at[:16] }}</span>
+        </div>
+    </header>
+
+    <div class="controls">
+        <input type="text" class="search-box" id="search" placeholder="Suche in allen Entwicklungen...">
+        <div class="filter-group" id="relevance-filters">
+            <button class="filter-btn active" data-relevance="all">Alle</button>
+            <button class="filter-btn" data-relevance="high">High</button>
+            <button class="filter-btn" data-relevance="medium">Medium</button>
+            <button class="filter-btn" data-relevance="low">Low</button>
+        </div>
+        <div class="filter-group" id="tag-filters"></div>
+        <button class="toggle-btn" id="toggle-all">Alle aufklappen</button>
+    </div>
+
+    <main id="dashboard"></main>
+
+    <footer>
+        <div class="archive-links" id="archive-links">
+            <a href="archive/">Archiv</a>
+        </div>
+        <div class="footer-note">Powered by Claude &middot; Web Search</div>
+    </footer>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const DATA = {{ data_json }};
+
+(function() {
+    const dashboard = document.getElementById('dashboard');
+    const searchInput = document.getElementById('search');
+    const relevanceFilters = document.getElementById('relevance-filters');
+    const tagFiltersContainer = document.getElementById('tag-filters');
+    const toggleAllBtn = document.getElementById('toggle-all');
+    const toast = document.getElementById('toast');
+
+    let activeRelevance = 'all';
+    let activeTags = new Set();
+    let searchQuery = '';
+    let allExpanded = false;
+
+    function showToast(msg) {
+        toast.textContent = msg;
+        toast.classList.add('show');
+        setTimeout(() => toast.classList.remove('show'), 2000);
+    }
+
+    function collectTags() {
+        const tags = new Set();
+        DATA.topics.forEach(t => {
+            (t.developments || []).forEach(d => {
+                (d.tags || []).forEach(tag => tags.add(tag));
+            });
+        });
+        return [...tags].sort();
+    }
+
+    function renderTagFilters() {
+        const tags = collectTags();
+        tagFiltersContainer.innerHTML = tags.map(tag =>
+            `<button class="filter-btn tag-filter" data-tag="${tag}">${tag}</button>`
+        ).join('');
+    }
+
+    function matchesDev(dev) {
+        if (activeRelevance !== 'all' && dev.relevance !== activeRelevance) return false;
+        if (activeTags.size > 0 && !(dev.tags || []).some(t => activeTags.has(t))) return false;
+        if (searchQuery) {
+            const q = searchQuery.toLowerCase();
+            const haystack = [dev.title, dev.description, dev.source, ...(dev.tags || [])].join(' ').toLowerCase();
+            if (!haystack.includes(q)) return false;
+        }
+        return true;
+    }
+
+    function renderDev(dev) {
+        const hidden = matchesDev(dev) ? '' : 'style="display:none"';
+        return `<div class="dev-card" ${hidden} data-relevance="${dev.relevance}" data-tags="${(dev.tags||[]).join(',')}">
+            <div class="relevance-bar ${dev.relevance}"></div>
+            <div class="dev-content">
+                <h4>${dev.title}</h4>
+                <p>${dev.description}</p>
+                <div class="dev-meta">
+                    ${dev.url ? `<a class="dev-source" href="${dev.url}" target="_blank" rel="noopener">${dev.source || 'Quelle'}</a>` : `<span class="dev-source">${dev.source || ''}</span>`}
+                    ${(dev.tags || []).map(t => `<span class="tag" data-tag="${t}">${t}</span>`).join('')}
+                </div>
+            </div>
+        </div>`;
+    }
+
+    function renderTopic(topic, idx) {
+        const devs = (topic.developments || []);
+        const visibleDevs = devs.filter(matchesDev);
+        const collapsed = allExpanded ? '' : 'collapsed';
+        const id = 'topic-' + idx;
+
+        if (searchQuery && visibleDevs.length === 0 && activeTags.size === 0 && activeRelevance === 'all') {
+            const q = searchQuery.toLowerCase();
+            const topicText = [topic.headline, topic.summary, topic.topic].join(' ').toLowerCase();
+            if (!topicText.includes(q)) return '';
+        }
+
+        return `<section class="topic-section ${collapsed}" id="${id}">
+            <div class="topic-header" onclick="toggleSection('${id}')">
+                <div class="topic-name">${topic.topic}</div>
+                <div class="topic-headline">${topic.headline}</div>
+                <div class="topic-summary">${topic.summary}</div>
+                <button class="share-btn" onclick="event.stopPropagation(); shareSection('${id}', '${topic.topic}')">Share</button>
+                <span class="expand-icon">&#9660;</span>
+            </div>
+            <div class="topic-body">
+                <div class="developments">
+                    <h3>Entwicklungen (${visibleDevs.length}/${devs.length})</h3>
+                    ${devs.length > 0 ? devs.map(renderDev).join('') : '<p class="no-results">Keine Entwicklungen verfügbar.</p>'}
+                </div>
+                ${(topic.market_signals || []).length > 0 ? `
+                <div class="market-signals">
+                    <h3>Market Signals</h3>
+                    <div class="signal-pills">
+                        ${topic.market_signals.map(s => `<span class="signal-pill">${s}</span>`).join('')}
+                    </div>
+                </div>` : ''}
+                ${topic.outlook ? `
+                <div class="outlook">
+                    <h3>Outlook</h3>
+                    <p>${topic.outlook}</p>
+                </div>` : ''}
+            </div>
+        </section>`;
+    }
+
+    function render() {
+        const html = DATA.topics.map((t, i) => renderTopic(t, i)).join('');
+        dashboard.innerHTML = html || '<p class="no-results">Keine Ergebnisse gefunden.</p>';
+    }
+
+    window.toggleSection = function(id) {
+        document.getElementById(id).classList.toggle('collapsed');
+    };
+
+    window.shareSection = function(id, name) {
+        const url = window.location.href.split('#')[0] + '#' + id;
+        navigator.clipboard.writeText(url).then(() => {
+            showToast('Link kopiert: ' + name);
+        }).catch(() => {
+            showToast('Kopieren fehlgeschlagen');
+        });
+    };
+
+    let searchTimeout;
+    searchInput.addEventListener('input', function() {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(() => {
+            searchQuery = this.value.trim();
+            render();
+        }, 200);
+    });
+
+    relevanceFilters.addEventListener('click', function(e) {
+        const btn = e.target.closest('.filter-btn');
+        if (!btn) return;
+        relevanceFilters.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        activeRelevance = btn.dataset.relevance;
+        render();
+    });
+
+    tagFiltersContainer.addEventListener('click', function(e) {
+        const btn = e.target.closest('.tag-filter');
+        if (!btn) return;
+        btn.classList.toggle('active');
+        if (btn.classList.contains('active')) {
+            activeTags.add(btn.dataset.tag);
+        } else {
+            activeTags.delete(btn.dataset.tag);
+        }
+        render();
+    });
+
+    dashboard.addEventListener('click', function(e) {
+        if (e.target.classList.contains('tag')) {
+            const tag = e.target.dataset.tag;
+            activeTags.add(tag);
+            const filterBtn = tagFiltersContainer.querySelector(`[data-tag="${tag}"]`);
+            if (filterBtn) filterBtn.classList.add('active');
+            render();
+        }
+    });
+
+    toggleAllBtn.addEventListener('click', function() {
+        allExpanded = !allExpanded;
+        this.textContent = allExpanded ? 'Alle zuklappen' : 'Alle aufklappen';
+        document.querySelectorAll('.topic-section').forEach(s => {
+            s.classList.toggle('collapsed', !allExpanded);
+        });
+    });
+
+    if (window.location.hash) {
+        setTimeout(() => {
+            const el = document.querySelector(window.location.hash);
+            if (el) {
+                el.classList.remove('collapsed');
+                el.scrollIntoView({ behavior: 'smooth' });
+            }
+        }, 100);
+    }
+
+    renderTagFilters();
+    render();
+})();
+</script>
+</body>
+</html>
+""")
+
+
+def _get_archive_dates():
+    """List all archived dates from site/archive/."""
+    archive_dir = SITE_DIR / "archive"
+    if not archive_dir.exists():
+        return []
+    dates = []
+    for f in sorted(archive_dir.glob("*.html"), reverse=True):
+        if f.stem != "index":
+            dates.append(f.stem)
+    return dates
+
+
+def _archive_current(site_dir):
+    """Move current index.html to archive if it exists."""
+    index_path = site_dir / "index.html"
+    if not index_path.exists():
+        return
+
+    try:
+        content = index_path.read_text(encoding="utf-8")
+        match = re.search(r'"date"\s*:\s*"(\d{4}-\d{2}-\d{2})"', content)
+        if match:
+            old_date = match.group(1)
+            archive_dir = site_dir / "archive"
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            dest = archive_dir / f"{old_date}.html"
+            if not dest.exists():
+                shutil.copy2(index_path, dest)
+                print(f"  Archived previous dashboard to {dest}")
+    except Exception as e:
+        print(f"  Warning: Could not archive previous index: {e}")
+
+
+def publish(data_path=None):
+    """Generate the HTML dashboard from research JSON data."""
+    if data_path is None:
+        today = date.today().isoformat()
+        data_path = str(DATA_DIR / f"{today}.json")
+
+    data_file = Path(data_path)
+    if not data_file.exists():
+        raise FileNotFoundError(f"Data file not found: {data_path}")
+
+    with open(data_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    print(f"  Publishing dashboard for {data['date']} ...")
+
+    SITE_DIR.mkdir(parents=True, exist_ok=True)
+    _archive_current(SITE_DIR)
+
+    data_json = json.dumps(data, ensure_ascii=False)
+    html = DASHBOARD_TEMPLATE.render(data=data, data_json=data_json)
+
+    output_path = SITE_DIR / "index.html"
+    output_path.write_text(html, encoding="utf-8")
+    print(f"  Dashboard written to {output_path}")
+
+    return str(output_path)
+
+
+if __name__ == "__main__":
+    import sys
+    path = sys.argv[1] if len(sys.argv) > 1 else None
+    publish(path)
