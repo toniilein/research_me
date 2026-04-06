@@ -1,0 +1,42 @@
+name: Daily Research
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # 06:00 UTC = 08:00 CEST
+  workflow_dispatch:       # Manual trigger
+
+permissions:
+  contents: write
+  pages: write
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r agent/requirements.txt
+
+      - name: Run research agent
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python -m agent.researcher
+
+      - name: Commit results
+        run: |
+          git config user.name "Research Bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add data/ site/
+          git diff --staged --quiet || git commit -m "research: $(date +%Y-%m-%d) daily update"
+          git push
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
