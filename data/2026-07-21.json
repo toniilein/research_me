@@ -1,0 +1,14 @@
+{
+  "date": "2026-07-21",
+  "generated_at": "2026-07-21T08:35:59.063417",
+  "topics": [
+    {
+      "topic": "Tokenisierung & RWA",
+      "headline": "Research fehlgeschlagen",
+      "summary": "Fehler bei der Recherche: \"Could not resolve authentication method. Expected one of api_key, auth_token, or credentials to be set. Or for one of the `X-Api-Key` or `Authorization` headers to be explicitly omitted\"",
+      "developments": [],
+      "market_signals": [],
+      "outlook": "Keine Daten verfügbar."
+    }
+  ]
+}
